@@ -1,0 +1,759 @@
+--[[
+  ---------------------------
+  1) Event handler & error setup
+  ---------------------------
+]]
+
+-- Main event wrapper: catches errors within onEvent
+function onEvent()
+    local _, err = pcall(function()
+        -- Everything in onEvent goes in here
+    end)
+
+    if err then
+        eventError = err
+    end
+end
+
+-- Error tracking
+local hasErrored, eventError
+
+-- Debug console text object
+local ErrorText = GameObject.findGameObject("debugConsoleText")
+assert(ErrorText, "Could not find GameObject 'debugConsoleText'")
+
+-- Load high scores (or default to infinity)
+highScores     = dataLoad() or {}
+flatHighScore  = highScores.flatCourse or math.huge
+treeHighScore  = highScores.treeCourse or math.huge
+tallHighScore  = highScores.tallCourse or math.huge
+longHighScore  = highScores.longCourse or math.huge
+
+-- DEBUG: show what actually loaded (note: each setText overwrites the previous)
+ErrorText:setText("Loaded flatCourse = "   .. tostring(highScores.flatCourse))
+ErrorText:setText("Loaded treeCourse = "   .. tostring(highScores.treeCourse))
+ErrorText:setText("Loaded tallCourse = "   .. tostring(highScores.tallCourse))
+ErrorText:setText("Loaded longCourse = "   .. tostring(highScores.longCourse))
+
+
+--[[
+  ---------------------------
+  2) Constants & timing
+  ---------------------------
+]]
+
+-- Last button press timestamp (used for cooldown)
+local buttonTimeout   = os.clock() - 0.5
+
+-- Radius for body presses
+local bodyPressRadius = 0.5
+
+
+--[[
+  ---------------------------
+  3) Utility functions
+  ---------------------------
+]]
+
+-- Returns true if enough time has passed since the last button press
+local function canPressButtons()
+    if os.clock() - buttonTimeout >= 0.5 then
+        buttonTimeout = os.clock()
+        return true
+    else
+        return false
+    end
+end
+
+-- Formats seconds into "MM:SS.mmm"
+local function formatTime(t)
+    local m  = math.floor(t / 60)
+    local s  = math.floor(t % 60)
+    local ms = math.floor((t % 1) * 1000)
+    return string.format("%02d:%02d.%03d", m, s, ms)
+end
+
+-- Computes fingertip world position given hand and finger rotations
+local function fingertipPos(handRot, handPos, fingerRot)
+    local r   = handRot * fingerRot
+    local off = Vec3.rotate(fingerTipOffset, r)
+    return handPos + off
+end
+
+-- Returns true if either fingertip is inside the object's AABB
+local function isHandPress(obj)
+    local lp = fingertipPos(LocalPlayer.leftHandRotation,
+                             LocalPlayer.leftHandPosition,
+                             fingerTipRotL)
+    local rp = fingertipPos(LocalPlayer.rightHandRotation,
+                             LocalPlayer.rightHandPosition,
+                             fingerTipRotR)
+
+    local minB = obj.position - obj.scale * 0.5
+    local maxB = obj.position + obj.scale * 0.5
+
+    local function inBox(p)
+        return p.x >= minB.x and p.x <= maxB.x
+           and p.y >= minB.y and p.y <= maxB.y
+           and p.z >= minB.z and p.z <= maxB.z
+    end
+
+    return inBox(lp) or inBox(rp)
+end
+
+-- Returns true if the player's torso is within bodyPressRadius of the object
+local function isBodyPress(obj)
+    local bp    = LocalPlayer.bodyPosition
+    local delta = bp - obj.position
+    return delta:length() <= bodyPressRadius
+end
+
+-- Returns true if object is pressed by hand OR by body
+local function isPressed(obj)
+    return isHandPress(obj) or isBodyPress(obj)
+end
+
+
+--[[
+  ---------------------------
+  4) Fingertip constants
+  ---------------------------
+]]
+
+fingerTipOffset = Vec3.new(0, 0.2, 0)
+fingerTipRotL   = Quat.fromEuler(0,  10,  21)
+fingerTipRotR   = Quat.fromEuler(0, -10, -21)
+
+
+--[[
+  ---------------------------
+  5) GameObject declarations
+  ---------------------------
+]]
+
+local resetButton  = GameObject.findGameObject("resetHighScoresButton")
+assert(resetButton, "resetHighScoresButton not found")
+resetButton:setCollision(true)
+resetButton:setVisibility(true)
+local resetPressed = false
+
+-- Pastor toggle buttons
+local pastorToggleOnBtn  = GameObject.findGameObject("pastorToggleOn")
+local pastorToggleOffBtn = GameObject.findGameObject("pastorToggleOff")
+assert(pastorToggleOnBtn,  "pastorToggleOn not found")
+assert(pastorToggleOffBtn, "pastorToggleOff not found")
+
+-- Flat course
+local flatStartButton   = GameObject.findGameObject("flatStartButton")
+local flatTimerText     = GameObject.findGameObject("flatTimerText")
+local flatTargets       = {
+    GameObject.findGameObject("targetButton1"),
+    GameObject.findGameObject("targetButton2"),
+    GameObject.findGameObject("targetButton3"),
+    GameObject.findGameObject("targetButton4"),
+    GameObject.findGameObject("targetButton5"),
+	GameObject.findGameObject("targetButton6"),
+}
+local flatHighScoreText = GameObject.findGameObject("flatHighScoreText")
+assert(flatHighScoreText, "flatHighScoreText not found")
+
+-- Tree course
+local treeStartButton   = GameObject.findGameObject("treeStartButton")
+local treeTimerText     = GameObject.findGameObject("treeTimerText")
+local treeTargets       = {}
+for i = 1, 12 do
+    treeTargets[i] = GameObject.findGameObject("treeButton" .. i)
+end
+local treeHighScoreText = GameObject.findGameObject("treeHighScoreText")
+assert(treeHighScoreText, "treeHighScoreText not found")
+
+-- Tallest-tree course
+local tallStartButton   = GameObject.findGameObject("tallestTreeStartButton")
+local tallTimerText     = GameObject.findGameObject("tallestTreeTimerText")
+local tallTargets       = {}
+for i = 1, 6 do
+    tallTargets[i] = GameObject.findGameObject("tallestTargetButton" .. i)
+end
+local tallHighScoreText = GameObject.findGameObject("tallHighScoreText")
+assert(tallHighScoreText, "tallHighScoreText not found")
+
+-- Long course
+local longStartButton   = GameObject.findGameObject("longStartButton")
+local longTimerText     = GameObject.findGameObject("longTimerText")
+local longTargets       = {}
+for i = 1, 16 do
+    longTargets[i] = GameObject.findGameObject("longTargetButton" .. i)
+end
+local longHighScoreText = GameObject.findGameObject("longHighScoreText")
+assert(longHighScoreText, "longHighScoreText not found")
+
+-- Weekly Pastor course
+local pastorStartButton      = GameObject.findGameObject("pastorStartButton")
+local pastorTimerText        = GameObject.findGameObject("pastorTimerText")
+local pastorTargets          = {}
+for i = 1, 11 do
+    local btn = GameObject.findGameObject("pastorButton" .. i)
+    assert(btn, "pastorButton" .. i .. " not found")
+    table.insert(pastorTargets, btn)
+end
+
+-- Primary player name display
+local primaryPlayerNameText = GameObject.findGameObject("primaryPlayerNameText")
+assert(primaryPlayerNameText, "primaryPlayerNameText not found")
+local primaryNameInitialized = false
+
+
+--[[
+  ---------------------------
+  6) Sanity checks
+  ---------------------------
+]]
+
+-- Ensure all start buttons, timer texts, and targets are present
+assert(flatStartButton,   "flatStartButton not found")
+assert(flatTimerText,     "flatTimerText not found")
+for i, tb in ipairs(flatTargets)  do assert(tb, ("targetButton%d not found"):format(i))  end
+
+assert(treeStartButton,   "treeStartButton not found")
+assert(treeTimerText,     "treeTimerText not found")
+for i, tb in ipairs(treeTargets) do assert(tb, ("treeButton%d not found"):format(i)) end
+
+assert(tallStartButton,   "tallestTreeStartButton not found")
+assert(tallTimerText,     "tallestTreeTimerText not found")
+for i, tb in ipairs(tallTargets) do assert(tb, ("tallestTargetButton%d not found"):format(i)) end
+
+assert(longStartButton,   "longStartButton not found")
+assert(longTimerText,     "longTimerText not found")
+for i, tb in ipairs(longTargets) do assert(tb, ("longTargetButton%d not found"):format(i)) end
+
+assert(pastorStartButton, "pastorStartButton not found")
+assert(pastorTimerText,   "pastorTimerText not found")
+for i, tb in ipairs(pastorTargets)do assert(tb, ("pastorButton%d not found"):format(i)) end
+
+assert(pastorToggleOnBtn,  "pastorToggleOn not found")
+assert(pastorToggleOffBtn, "pastorToggleoff not found")
+
+
+--[[
+  ---------------------------
+  7) Initial object states & run-state vars
+  ---------------------------
+]]
+
+-- Helper to disable all buttons and hide targets at start
+local function initCourse(startBtn, targets)
+    startBtn:setCollision(false)
+    for _, tb in ipairs(targets) do
+        tb:setCollision(false)
+        tb:setVisibility(false)
+    end
+end
+
+-- Initialize each course's buttons and targets
+initCourse(flatStartButton,   flatTargets)
+initCourse(treeStartButton,   treeTargets)
+initCourse(tallStartButton,   tallTargets)
+initCourse(longStartButton,   longTargets)
+initCourse(pastorStartButton, pastorTargets)
+
+-- State variables for each course
+local flatStartPressed,   flatRunning,   flatStartTime,   flatPressedTargets   = false, false, 0, {}
+local treeStartPressed,   treeRunning,   treeStartTime,   treePressedTargets   = false, false, 0, {}
+local tallStartPressed,   tallRunning,   tallStartTime,   tallPressedTargets   = false, false, 0, {}
+local longStartPressed,   longRunning,   longStartTime,   longPressedTargets   = false, false, 0, {}
+local pastorStartPressed, pastorRunning, pastorStartTime, pastorPressedTargets = false, false, 0, {}
+
+-- Enable collision and initial visibility for pastor toggles
+pastorToggleOnBtn:setCollision(true)
+pastorToggleOffBtn:setCollision(true)
+pastorToggleOnBtn:setVisibility(true)
+pastorToggleOffBtn:setVisibility(true)
+
+-- Track whether pastor targets are visible (start OFF)
+local pastorTargetsVisible = false
+for _, b in ipairs(pastorTargets) do
+    b:setVisibility(pastorTargetsVisible)
+end
+
+
+--[[
+  ---------------------------
+  8) Main loop
+  ---------------------------
+]]
+
+function tick(dt)
+    if hasErrored then return end
+
+    local _, err = pcall(function()
+        if not InRoom or LocalPlayer == nil then
+            return
+        end
+
+        -- Initialize primary player name display
+        if not primaryNameInitialized then
+            primaryPlayerNameText:setText(LocalPlayer.playerName)
+            primaryNameInitialized = true
+        end
+
+        -- Initialize and display high scores once per course
+        if not flatScoreInitialized then
+            flatHighScoreText = GameObject.findGameObject("flatHighScoreText")
+            if flatHighScoreText then
+                local display = (flatHighScore < math.huge and formatTime(flatHighScore))
+                              or "--:--.---"
+                flatHighScoreText:setText(display)
+            end
+            flatScoreInitialized = true
+        end
+
+        -- =====================
+        -- Flat Course Logic
+        -- =====================
+        if not flatStartPressed
+           and isHandPress(flatStartButton)
+           and canPressButtons()
+        then
+            flatStartPressed = true
+            flatStartButton:setVisibility(false)
+            playSound(0, flatStartButton.position, 1)
+
+            if not flatRunning then
+                -- Start the flat course
+                flatRunning   = true
+                flatStartTime = os.clock()
+                flatTimerText:setText(formatTime(0))
+                for i = 1, #flatTargets do
+                    flatPressedTargets[i] = false
+                    flatTargets[i]:setVisibility(true)
+                end
+            else
+                -- Stop and reset the flat course
+                flatRunning = false
+                for i = 1, #flatTargets do flatTargets[i]:setVisibility(false) end
+                for i = 1, #flatPressedTargets do flatPressedTargets[i] = false end
+                flatTimerText:setText(formatTime(0))
+                flatStartButton:setVisibility(true)
+            end
+
+        elseif flatStartPressed
+               and not isHandPress(flatStartButton)
+        then
+            -- Reset press flag when user releases button
+            flatStartPressed = false
+            flatStartButton:setVisibility(true)
+        end
+
+        if flatRunning then
+            -- Handle target presses and timing
+            for i, tb in ipairs(flatTargets) do
+                if not flatPressedTargets[i] and isPressed(tb) then
+                    flatPressedTargets[i] = true
+                    tb:setVisibility(false)
+                    playSound(0, tb.position, 1)
+                end
+            end
+
+            local now = os.clock() - flatStartTime
+            flatTimerText:setText(formatTime(now))
+
+            -- Check for completion
+            local allPressed = true
+            for i = 1, #flatTargets do
+                if not flatPressedTargets[i] then
+                    allPressed = false
+                    break
+                end
+            end
+
+            if allPressed then
+                -- High-score logic
+                if now < flatHighScore then
+                    flatHighScore = now
+                    if flatHighScoreText then
+                        flatHighScoreText:setText(formatTime(flatHighScore))
+                    end
+                    highScores.flatCourse = flatHighScore
+                    dataSave(highScores)
+                end
+
+                -- Reset course
+                flatRunning = false
+                flatTimerText:setText(formatTime(os.clock() - flatStartTime))
+                flatStartButton:setVisibility(true)
+                flatStartPressed = false
+            end
+        end
+
+        -- (Repeat similar structure for Tree, Tall, Long, and Pastor courses…
+        --  see below for full repetition.)
+
+        -- =====================
+        -- Tree Course Logic
+        -- =====================
+        if not treeScoreInitialized then
+            treeHighScoreText = GameObject.findGameObject("treeHighScoreText")
+            if treeHighScoreText then
+                local display = (treeHighScore < math.huge and formatTime(treeHighScore))
+                              or "--:--.---"
+                treeHighScoreText:setText(display)
+            end
+            treeScoreInitialized = true
+        end
+
+        if not treeStartPressed
+           and isHandPress(treeStartButton)
+           and canPressButtons()
+        then
+            treeStartPressed = true
+            treeStartButton:setVisibility(false)
+            playSound(0, treeStartButton.position, 1)
+
+            if not treeRunning then
+                treeRunning   = true
+                treeStartTime = os.clock()
+                treeTimerText:setText(formatTime(0))
+                for i = 1, #treeTargets do
+                    treePressedTargets[i] = false
+                    treeTargets[i]:setVisibility(true)
+                end
+            else
+                treeRunning = false
+                for i = 1, #treeTargets do treeTargets[i]:setVisibility(false) end
+                for i = 1, #treePressedTargets do treePressedTargets[i] = false end
+                treeTimerText:setText(formatTime(0))
+                treeStartButton:setVisibility(true)
+            end
+
+        elseif treeStartPressed
+               and not isHandPress(treeStartButton)
+        then
+            treeStartPressed = false
+            treeStartButton:setVisibility(true)
+        end
+
+        if treeRunning then
+            for i, tb in ipairs(treeTargets) do
+                if not treePressedTargets[i] and isPressed(tb) then
+                    treePressedTargets[i] = true
+                    tb:setVisibility(false)
+                    playSound(0, tb.position, 1)
+                end
+            end
+
+            local now = os.clock() - treeStartTime
+            treeTimerText:setText(formatTime(now))
+
+            local allPressed = true
+            for i = 1, #treeTargets do
+                if not treePressedTargets[i] then
+                    allPressed = false
+                    break
+                end
+            end
+
+            if allPressed then
+                if now < treeHighScore then
+                    treeHighScore = now
+                    if treeHighScoreText then
+                        treeHighScoreText:setText(formatTime(treeHighScore))
+                    end
+                    highScores.treeCourse = treeHighScore
+                    dataSave(highScores)
+                end
+
+                treeRunning       = false
+                treeTimerText:setText(formatTime(os.clock() - treeStartTime))
+                treeStartButton:setVisibility(true)
+                treeStartPressed = false
+            end
+        end
+
+        -- =====================
+        -- Tallest Tree Course Logic
+        -- =====================
+        if not tallScoreInitialized then
+            tallHighScoreText = GameObject.findGameObject("tallHighScoreText")
+            if tallHighScoreText then
+                local display = (tallHighScore < math.huge and formatTime(tallHighScore))
+                              or "--:--.---"
+                tallHighScoreText:setText(display)
+            end
+            tallScoreInitialized = true
+        end
+
+        if not tallStartPressed
+           and isHandPress(tallStartButton)
+           and canPressButtons()
+        then
+            tallStartPressed = true
+            tallStartButton:setVisibility(false)
+            playSound(0, tallStartButton.position, 1)
+
+            if not tallRunning then
+                tallRunning   = true
+                tallStartTime = os.clock()
+                tallTimerText:setText(formatTime(0))
+                for i = 1, #tallTargets do
+                    tallPressedTargets[i] = false
+                    tallTargets[i]:setVisibility(true)
+                end
+            else
+                tallRunning = false
+                for i = 1, #tallTargets do tallTargets[i]:setVisibility(false) end
+                for i = 1, #tallPressedTargets do tallPressedTargets[i] = false end
+                tallTimerText:setText(formatTime(0))
+                tallStartButton:setVisibility(true)
+            end
+
+        elseif tallStartPressed
+               and not isHandPress(tallStartButton)
+        then
+            tallStartPressed = false
+            tallStartButton:setVisibility(true)
+        end
+
+        if tallRunning then
+            for i, tb in ipairs(tallTargets) do
+                if not tallPressedTargets[i] and isPressed(tb) then
+                    tallPressedTargets[i] = true
+                    tb:setVisibility(false)
+                    playSound(0, tb.position, 1)
+                end
+            end
+
+            local now = os.clock() - tallStartTime
+            tallTimerText:setText(formatTime(now))
+
+            local allPressed = true
+            for i = 1, #tallTargets do
+                if not tallPressedTargets[i] then
+                    allPressed = false
+                    break
+                end
+            end
+
+            if allPressed then
+                if now < tallHighScore then
+                    tallHighScore = now
+                    if tallHighScoreText then
+                        tallHighScoreText:setText(formatTime(tallHighScore))
+                    end
+                    highScores.tallCourse = tallHighScore
+                    dataSave(highScores)
+                end
+
+                tallRunning       = false
+                tallTimerText:setText(formatTime(os.clock() - tallStartTime))
+                tallStartButton:setVisibility(true)
+                tallStartPressed = false
+            end
+        end
+
+        -- =====================
+        -- Long Course Logic
+        -- =====================
+        if not longScoreInitialized then
+            longHighScoreText = GameObject.findGameObject("longHighScoreText")
+            if longHighScoreText then
+                local display = (longHighScore < math.huge and formatTime(longHighScore))
+                              or "--:--.---"
+                longHighScoreText:setText(display)
+            end
+            longScoreInitialized = true
+        end
+
+        if not longStartPressed
+           and isHandPress(longStartButton)
+           and canPressButtons()
+        then
+            longStartPressed = true
+            longStartButton:setVisibility(false)
+            playSound(0, longStartButton.position, 1)
+
+            if not longRunning then
+                longRunning   = true
+                longStartTime = os.clock()
+                longTimerText:setText(formatTime(0))
+                for i = 1, #longTargets do
+                    longPressedTargets[i] = false
+                    longTargets[i]:setVisibility(true)
+                end
+            else
+                longRunning = false
+                for i = 1, #longTargets do longTargets[i]:setVisibility(false) end
+                for i = 1, #longPressedTargets do longPressedTargets[i] = false end
+                longTimerText:setText(formatTime(0))
+                longStartButton:setVisibility(true)
+            end
+
+        elseif longStartPressed
+               and not isHandPress(longStartButton)
+        then
+            longStartPressed = false
+            longStartButton:setVisibility(true)
+        end
+
+        if longRunning then
+            for i, tb in ipairs(longTargets) do
+                if not longPressedTargets[i] and isPressed(tb) then
+                    longPressedTargets[i] = true
+                    tb:setVisibility(false)
+                    playSound(0, tb.position, 1)
+                end
+            end
+
+            local now = os.clock() - longStartTime
+            longTimerText:setText(formatTime(now))
+
+            local allPressed = true
+            for i = 1, #longTargets do
+                if not longPressedTargets[i] then
+                    allPressed = false
+                    break
+                end
+            end
+
+            if allPressed then
+                if now < longHighScore then
+                    longHighScore = now
+                    if longHighScoreText then
+                        longHighScoreText:setText(formatTime(longHighScore))
+                    end
+                    highScores.longCourse = longHighScore
+                    dataSave(highScores)
+                end
+
+                longRunning       = false
+                longTimerText:setText(formatTime(os.clock() - longStartTime))
+                longStartButton:setVisibility(true)
+                longStartPressed = false
+            end
+        end
+
+        -- =====================
+        -- Pastor Toggle Logic
+        -- =====================
+
+        -- Show pastor targets (OFF → ON)
+        if not pastorTargetsVisible
+           and isHandPress(pastorToggleOffBtn)
+           and canPressButtons()
+        then
+            pastorTargetsVisible = true
+            for _, b in ipairs(pastorTargets) do
+                b:setVisibility(true)
+            end
+            pastorToggleOffBtn:setVisibility(false)
+            pastorToggleOnBtn :setVisibility(true)
+        end
+
+        -- Hide pastor targets (ON → OFF)
+        if pastorTargetsVisible
+           and isHandPress(pastorToggleOnBtn)
+           and canPressButtons()
+        then
+            pastorTargetsVisible = false
+            for _, b in ipairs(pastorTargets) do
+                b:setVisibility(false)
+            end
+            pastorToggleOnBtn :setVisibility(false)
+            pastorToggleOffBtn:setVisibility(true)
+        end
+
+        -- =====================
+        -- Pastor Weekly Course Logic
+        -- =====================
+        if not pastorStartPressed
+           and isHandPress(pastorStartButton)
+           and canPressButtons()
+        then
+            pastorStartPressed = true
+            pastorStartButton:setVisibility(false)
+            playSound(0, pastorStartButton.position, 1)
+
+            if not pastorRunning then
+                pastorRunning   = true
+                pastorStartTime = os.clock()
+                pastorTimerText:setText(formatTime(0))
+                for i = 1, #pastorTargets do
+                    pastorPressedTargets[i] = false
+                    pastorTargets[i]:setVisibility(true)
+                end
+            else
+                pastorRunning = false
+                for i = 1, #pastorTargets do pastorTargets[i]:setVisibility(false) end
+                for i = 1, #pastorPressedTargets do pastorPressedTargets[i] = false end
+                pastorTimerText:setText(formatTime(0))
+                pastorStartButton:setVisibility(true)
+            end
+
+        elseif pastorStartPressed
+               and not isHandPress(pastorStartButton)
+        then
+            pastorStartPressed = false
+            pastorStartButton:setVisibility(true)
+        end
+
+        if pastorRunning then
+            for i, tb in ipairs(pastorTargets) do
+                if not pastorPressedTargets[i] and isPressed(tb) then
+                    pastorPressedTargets[i] = true
+                    tb:setVisibility(false)
+                    playSound(0, tb.position, 1)
+                end
+            end
+
+            local now = os.clock() - pastorStartTime
+            pastorTimerText:setText(formatTime(now))
+
+            local allPressed = true
+            for i = 1, #pastorTargets do
+                if not pastorPressedTargets[i] then
+                    allPressed = false
+                    break
+                end
+            end
+
+            if allPressed then
+                pastorRunning = false
+                pastorTimerText:setText(formatTime(os.clock() - pastorStartTime))
+                pastorStartButton:setVisibility(true)
+                pastorStartPressed = false
+            end
+        end
+    
+	
+		if not resetPressed
+		   and isHandPress(resetButton)
+		   and canPressButtons()
+		then
+			resetPressed = true
+			-- clear and save
+			highScores = {}
+			dataSave(highScores)
+			-- reset in-memory
+			flatHighScore = math.huge
+			treeHighScore = math.huge
+			tallHighScore = math.huge
+			longHighScore = math.huge
+			-- update UI
+			local noScore = "--:--.---"
+			flatHighScoreText:setText(noScore)
+			treeHighScoreText:setText(noScore)
+			tallHighScoreText:setText(noScore)
+			longHighScoreText:setText(noScore)
+			playSound(1, resetButton.position, 1)
+		end
+		if resetPressed and not isHandPress(resetButton) then
+			resetPressed = false
+		end
+	end)
+
+    -- Global error cleanup
+    if err or eventError then
+        hasErrored = true
+        if not eventError then eventError = err end
+        ErrorText:setText(tostring(eventError))
+    end
+end

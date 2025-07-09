@@ -18,7 +18,6 @@ Material:
   - _USE_TEXTURE
   - _UV_SOURCE__UV0
   - _WATER_CAUSTICS
-  - _WATER_EFFECT
   m_InvalidKeywords:
   - _GLOSSYREFLECTIONS_OFF
   - _LIGHTMAP_MODE__DAY_CYCLE
@@ -295,7 +294,7 @@ Material:
     - _VertexWaveStartOffset: 0
     - _VertexWaveToggle: 0
     - _WaterCaustics: 1
-    - _WaterEffect: 1
+    - _WaterEffect: 0
     - _WaveAmplitude: 0.02
     - _WaveFrequency: 1
     - _WaveScale: 12
